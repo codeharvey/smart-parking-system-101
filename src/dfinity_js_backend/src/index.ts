@@ -99,7 +99,6 @@ const ParkingSpotPayload = Record({
   price_per_hour: text,
 });
 
-// Reservation Payload
 const ReservationPayload = Record({
   user_id: text,
   spot_id: text,
@@ -141,12 +140,48 @@ const reservationStorage = StableBTreeMap(2, text, Reservation);
 const paymentStorage = StableBTreeMap(3, text, Payment);
 const transactionLog = StableBTreeMap(4, text, Transaction);
 
+// Helper Functions
+function isValidText(input: string | undefined): boolean {
+  return input !== undefined && input.trim().length > 0;
+}
+
+function isValidNat64(input: bigint): boolean {
+  return input >= 0n;
+}
+
+function findUser(userId: string) {
+  const userOpt = userStorage.get(userId);
+  if ("None" in userOpt) {
+    return Err({ NotFound: "User not found" });
+  }
+  return Ok(userOpt.Some);
+}
+
+function findParkingSpot(spotId: string) {
+  const spotOpt = parkingSpotStorage.get(spotId);
+  if ("None" in spotOpt) {
+    return Err({ NotFound: "Parking spot not found" });
+  }
+  return Ok(spotOpt.Some);
+}
+
+function isAuthenticated(userId: string, password: string) {
+  const user = findUser(userId);
+  if ("Err" in user || user.Ok.password !== password) {
+    return Err({ Error: "Authentication failed" });
+  }
+  return Ok(true);
+}
+
 // Canister Declaration
 export default Canister({
   // Create Admin User
   createAdmin: update([UserPayload], Result(User, Message), (payload) => {
-    // Validate payload fields
-    if (!payload.username || !payload.password || !payload.email) {
+    if (
+      !isValidText(payload.username) ||
+      !isValidText(payload.password) ||
+      !isValidText(payload.email)
+    ) {
       return Err({ InvalidPayload: "Required fields missing" });
     }
 
@@ -165,8 +200,11 @@ export default Canister({
 
   // Create User
   createUser: update([UserPayload], Result(User, Message), (payload) => {
-    // Validate payload fields
-    if (!payload.username || !payload.password || !payload.email) {
+    if (
+      !isValidText(payload.username) ||
+      !isValidText(payload.password) ||
+      !isValidText(payload.email)
+    ) {
       return Err({ InvalidPayload: "Required fields missing" });
     }
 
@@ -203,11 +241,7 @@ export default Canister({
 
   // Get User by ID
   getUserById: query([text], Result(User, Message), (id) => {
-    const userOpt = userStorage.get(id);
-    if ("None" in userOpt) {
-      return Err({ NotFound: "User not found" });
-    }
-    return Ok(userOpt.Some);
+    return findUser(id);
   }),
 
   // Create Parking Spot
@@ -215,7 +249,7 @@ export default Canister({
     [ParkingSpotPayload],
     Result(ParkingSpot, Message),
     (payload) => {
-      if (!payload.admin_id || !payload.location) {
+      if (!isValidText(payload.admin_id) || !isValidText(payload.location)) {
         return Err({ InvalidPayload: "Missing required fields" });
       }
 
@@ -241,22 +275,7 @@ export default Canister({
     return Ok(spots);
   }),
 
-  // Get Parking Spot by Location
-  getParkingSpotByLocation: query(
-    [text],
-    Result(ParkingSpot, Message),
-    (location) => {
-      const spot = parkingSpotStorage
-        .values()
-        .find((spot) => spot.location === location);
-      if (!spot) {
-        return Err({ NotFound: "Parking spot not found" });
-      }
-      return Ok(spot);
-    }
-  ),
-
-  //n Get Available Parking Spots
+  // Get Available Parking Spots
   getAvailableParkingSpots: query([], Result(Vec(ParkingSpot), Message), () => {
     const spots = parkingSpotStorage
       .values()
@@ -272,17 +291,13 @@ export default Canister({
     [ReservationPayload],
     Result(Reservation, Message),
     (payload) => {
-      const userOpt = userStorage.get(payload.user_id);
-      if ("None" in userOpt) {
-        return Err({ NotFound: "User not found" });
-      }
+      const userRes = findUser(payload.user_id);
+      if ("Err" in userRes) return userRes;
 
-      const spotOpt = parkingSpotStorage.get(payload.spot_id);
-      if ("None" in spotOpt) {
-        return Err({ NotFound: "Parking spot not found" });
-      }
+      const spotRes = findParkingSpot(payload.spot_id);
+      if ("Err" in spotRes) return spotRes;
 
-      const spot = spotOpt.Some;
+      const spot = spotRes.Ok;
       if (BigInt(spot.number_of_spots) === 0n) {
         return Err({ InvalidPayload: "No available parking spots" });
       }
@@ -292,7 +307,6 @@ export default Canister({
         parseFloat(spot.price_per_hour) * Number(payload.duration_hours)
       }`;
 
-      // Create reservation and include amount payable
       const reservation = {
         id: reservationId,
         ...payload,
@@ -325,30 +339,22 @@ export default Canister({
         return Err({ InvalidPayload: "Amount must be greater than zero" });
       }
 
-      const reservationOpt = reservationStorage.get(payload.reservation_id);
-      if ("None" in reservationOpt) {
+      const reservationRes = reservationStorage.get(payload.reservation_id);
+      if ("None" in reservationRes) {
         return Err({ NotFound: "Reservation not found" });
       }
 
-      // Ensure the amount is equal to the amount payable
-      const reservation = reservationOpt.Some;
-
-      if (
-        parseFloat(reservation.amount_payable) !== parseFloat(payload.amount)
-      ) {
+      const reservation = reservationRes.Some;
+      if (parseFloat(reservation.amount_payable) !== parseFloat(payload.amount)) {
         return Err({
           InvalidPayload: "Amount does not match the amount payable",
         });
       }
 
-      // Ensure the user has enough balance
-      const userOpt = userStorage.get(reservation.user_id);
+      const userRes = findUser(reservation.user_id);
+      if ("Err" in userRes) return userRes;
 
-      if ("None" in userOpt) {
-        return Err({ NotFound: "User not found" });
-      }
-
-      const user = userOpt.Some;
+      const user = userRes.Ok;
 
       if (BigInt(user.balance) < BigInt(payload.amount)) {
         return Err({ Error: "Insufficient balance" });
@@ -367,7 +373,6 @@ export default Canister({
       };
 
       userStorage.insert(reservation.user_id, user);
-
       paymentStorage.insert(paymentId, payment);
       return Ok(payment);
     }
@@ -387,17 +392,14 @@ export default Canister({
     [WithdrawalPayload],
     Result(Message, Message),
     (payload) => {
-      const userOpt = userStorage.get(payload.user_id);
-      if ("None" in userOpt) {
-        return Err({ NotFound: "User not found" });
-      }
+      const userRes = findUser(payload.user_id);
+      if ("Err" in userRes) return userRes;
 
-      let user = userOpt.Some;
+      let user = userRes.Ok;
       user.balance += BigInt(payload.amount);
 
       userStorage.insert(payload.user_id, user);
 
-      // Log the transaction
       const transaction = {
         user_id: payload.user_id,
         amount: `${payload.amount}`,
@@ -415,18 +417,15 @@ export default Canister({
     [WithdrawalPayload],
     Result(Message, Message),
     (payload) => {
-      const userOpt = userStorage.get(payload.user_id);
-      if ("None" in userOpt) {
-        return Err({ NotFound: "User not found" });
-      }
+      const userRes = findUser(payload.user_id);
+      if ("Err" in userRes) return userRes;
 
-      let user = userOpt.Some;
+      let user = userRes.Ok;
 
       if (BigInt(user.balance) < BigInt(payload.amount)) {
         return Err({ Error: "Insufficient balance" });
       }
 
-      // Adjusted logic for fee calculation using bigint
       const fee = (BigInt(payload.amount) * 1n) / 100n;
       const amountAfterFee = BigInt(payload.amount) - fee;
 
@@ -434,7 +433,6 @@ export default Canister({
 
       userStorage.insert(payload.user_id, user);
 
-      // Log the transaction
       const transaction = {
         user_id: payload.user_id,
         amount: `${payload.amount}`,
@@ -452,12 +450,10 @@ export default Canister({
     [ChangeUserRolePayload],
     Result(User, Message),
     (payload) => {
-      const userOpt = userStorage.get(payload.user_id);
-      if ("None" in userOpt) {
-        return Err({ NotFound: "User not found" });
-      }
+      const userRes = findUser(payload.user_id);
+      if ("Err" in userRes) return userRes;
 
-      let user = userOpt.Some;
+      let user = userRes.Ok;
       user.role = payload.role;
 
       userStorage.insert(payload.user_id, user);
